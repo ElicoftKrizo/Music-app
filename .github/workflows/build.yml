@@ -1,0 +1,322 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# CustomPlayer — Unsigned IPA Cloud Build
+# Builds: ContentView.swift, ContentView+Player, Track.swift,
+#         TrackManagerView.swift, FileManager+Sandbox.swift, App.swift
+# Output: CustomPlayer.ipa (unsigned, sideloadable via AltStore / Sideloadly)
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: Build Unsigned IPA
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  SCHEME:               "CustomPlayer"
+  CONFIGURATION:        "Debug"
+  DERIVED_DATA_PATH:    "${{ github.workspace }}/DerivedData"
+  IPA_OUTPUT_DIR:       "${{ github.workspace }}/output"
+  APP_NAME:             "CustomPlayer"
+
+jobs:
+  build-unsigned-ipa:
+    name: Generate → Build → Package Unsigned IPA
+    runs-on: macos-14
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. Select Xcode 15 ────────────────────────────────────────────────
+      - name: Select Xcode 15
+        run: |
+          XCODE_PATH=$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)
+          echo "Xcode path: $XCODE_PATH"
+          sudo xcode-select --switch "$XCODE_PATH"
+          xcodebuild -version
+          swift --version
+
+      # ── 3. Install mise ───────────────────────────────────────────────────
+      - name: Install mise
+        run: |
+          curl -fsSL https://mise.run | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          echo "$HOME/.local/share/mise/shims" >> $GITHUB_PATH
+
+      # ── 4. Write .mise.toml if absent ─────────────────────────────────────
+      - name: Create .mise.toml if absent
+        run: |
+          if [ ! -f .mise.toml ] && [ ! -f .tuist-version ]; then
+            printf '[tools]\ntuist = "4.20.0"\n' > .mise.toml
+            echo ".mise.toml created"
+          else
+            echo ".mise.toml / .tuist-version already present"
+          fi
+
+      # ── 5. Install Tuist via mise ─────────────────────────────────────────
+      - name: Install Tuist via mise
+        run: |
+          mise install
+          mise reshim
+          mise exec -- tuist version
+
+      # ── 6. Ensure App.swift entry point exists ────────────────────────────
+      # Required: Tuist Sources/**/*.swift glob must include @main
+      - name: Ensure App.swift exists
+        run: |
+          APPMAIN="$GITHUB_WORKSPACE/Sources/App.swift"
+          if [ ! -f "$APPMAIN" ]; then
+            echo "App.swift not found — generating entry point"
+            mkdir -p "$GITHUB_WORKSPACE/Sources"
+            cat > "$APPMAIN" << 'SWIFT'
+          import SwiftUI
+          @main
+          struct CustomPlayerApp: App {
+              var body: some Scene {
+                  WindowGroup { ContentView() }
+              }
+          }
+          SWIFT
+            echo "App.swift created"
+          else
+            echo "App.swift already present:"
+            cat "$APPMAIN"
+          fi
+
+      # ── 7. Verify all required Swift source files ─────────────────────────
+      - name: Verify source files
+        run: |
+          echo "Sources directory:"
+          ls -lh "$GITHUB_WORKSPACE/Sources/"
+          REQUIRED=("App.swift" "ContentView.swift" "Track.swift" "TrackManagerView.swift" "FileManager+Sandbox.swift")
+          for f in "${REQUIRED[@]}"; do
+            if [ -f "$GITHUB_WORKSPACE/Sources/$f" ]; then
+              echo "  ✓ $f"
+            else
+              echo "  ✗ MISSING: $f"
+            fi
+          done
+
+      # ── 8. Tuist fetch/resolve dependencies ───────────────────────────────
+      - name: Tuist install (resolve dependencies)
+        run: |
+          mise exec -- tuist install --path "$GITHUB_WORKSPACE" || true
+
+      # ── 9. Tuist generate ─────────────────────────────────────────────────
+      - name: Tuist generate
+        run: |
+          mise exec -- tuist generate \
+            --path "$GITHUB_WORKSPACE" \
+            --no-open
+          echo "Workspace / project files generated:"
+          ls -la "$GITHUB_WORKSPACE"
+
+      # ── 10. Resolve workspace or project path ─────────────────────────────
+      - name: Resolve build target path
+        id: resolve_target
+        run: |
+          WORKSPACE="$GITHUB_WORKSPACE/${{ env.APP_NAME }}.xcworkspace"
+          PROJECT="$GITHUB_WORKSPACE/${{ env.APP_NAME }}.xcodeproj"
+
+          if [ -d "$WORKSPACE" ] || [ -f "$WORKSPACE" ]; then
+            echo "Using workspace: $WORKSPACE"
+            echo "build_flag=-workspace" >> $GITHUB_OUTPUT
+            echo "build_path=$WORKSPACE" >> $GITHUB_OUTPUT
+          elif [ -d "$PROJECT" ]; then
+            echo "Using project: $PROJECT"
+            echo "build_flag=-project" >> $GITHUB_OUTPUT
+            echo "build_path=$PROJECT" >> $GITHUB_OUTPUT
+          else
+            echo "ERROR: No .xcworkspace or .xcodeproj found"
+            ls -la "$GITHUB_WORKSPACE"
+            exit 1
+          fi
+
+          # List available schemes
+          xcodebuild \
+            "${{ steps.resolve_target.outputs.build_flag || '-workspace' }}" \
+            "${{ steps.resolve_target.outputs.build_path || '$GITHUB_WORKSPACE/CustomPlayer.xcworkspace' }}" \
+            -list 2>/dev/null || true
+
+      # ── 11. Ensure Resources placeholder assets exist ─────────────────────
+      - name: Create placeholder Resources (if missing)
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/Resources"
+
+          # music.mp3 — minimal valid ID3 + silent MP3 frame
+          if [ ! -f "$GITHUB_WORKSPACE/Resources/music.mp3" ]; then
+            python3 - << 'PYEOF'
+          import struct, zlib, os
+          ws = os.environ.get("GITHUB_WORKSPACE", "")
+          path = os.path.join(ws, "Resources", "music.mp3")
+          id3  = b'ID3\x03\x00\x00\x00\x00\x00\x00'
+          frame = b'\xff\xfb\x90\x00' + b'\x00' * 413
+          open(path, 'wb').write(id3 + frame)
+          print(f"Stub music.mp3 → {path}")
+          PYEOF
+          fi
+
+          # haptic.ahap — minimal valid JSON pattern
+          if [ ! -f "$GITHUB_WORKSPACE/Resources/haptic.ahap" ]; then
+            cat > "$GITHUB_WORKSPACE/Resources/haptic.ahap" << 'AHAP'
+          {
+            "Version": 1.0,
+            "Metadata": { "Project": "CustomPlayer" },
+            "Pattern": [
+              {
+                "Event": {
+                  "Time": 0.0,
+                  "EventType": "HapticTransient",
+                  "EventParameters": [
+                    { "ParameterID": "HapticIntensity",  "ParameterValue": 0.5 },
+                    { "ParameterID": "HapticSharpness",  "ParameterValue": 0.5 }
+                  ]
+                }
+              }
+            ]
+          }
+          AHAP
+          fi
+
+          # cover.png — 1x1 dark-maroon PNG
+          if [ ! -f "$GITHUB_WORKSPACE/Resources/cover.png" ]; then
+            python3 - << 'PYEOF'
+          import struct, zlib, os
+          def png_1x1(r,g,b):
+              def chunk(t,d): c=struct.pack(">I",len(d))+t+d; return c+struct.pack(">I",zlib.crc32(t+d)&0xFFFFFFFF)
+              return (b'\x89PNG\r\n\x1a\n'
+                      + chunk(b'IHDR', struct.pack(">IIBBBBB",1,1,8,2,0,0,0))
+                      + chunk(b'IDAT', zlib.compress(bytes([0,r,g,b])))
+                      + chunk(b'IEND', b''))
+          ws   = os.environ.get("GITHUB_WORKSPACE","")
+          path = os.path.join(ws,"Resources","cover.png")
+          open(path,'wb').write(png_1x1(80,10,30))
+          print(f"Stub cover.png → {path}")
+          PYEOF
+          fi
+
+          echo "Resources:"
+          ls -lh "$GITHUB_WORKSPACE/Resources/"
+
+      # ── 12. xcodebuild — unsigned device build ────────────────────────────
+      - name: Build unsigned .app
+        run: |
+          gem install xcpretty --no-document --quiet 2>/dev/null || true
+          mkdir -p "${{ env.DERIVED_DATA_PATH }}"
+
+          BUILD_FLAG="${{ steps.resolve_target.outputs.build_flag }}"
+          BUILD_PATH="${{ steps.resolve_target.outputs.build_path }}"
+
+          # Fallback if step outputs are empty (rare race on first run)
+          if [ -z "$BUILD_FLAG" ]; then
+            WS="$GITHUB_WORKSPACE/${{ env.APP_NAME }}.xcworkspace"
+            PROJ="$GITHUB_WORKSPACE/${{ env.APP_NAME }}.xcodeproj"
+            if [ -d "$WS" ] || [ -f "$WS" ]; then
+              BUILD_FLAG="-workspace"; BUILD_PATH="$WS"
+            else
+              BUILD_FLAG="-project";   BUILD_PATH="$PROJ"
+            fi
+          fi
+
+          echo "Building with: $BUILD_FLAG $BUILD_PATH"
+
+          xcodebuild build \
+            $BUILD_FLAG "$BUILD_PATH" \
+            -scheme "${{ env.SCHEME }}" \
+            -configuration "${{ env.CONFIGURATION }}" \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "${{ env.DERIVED_DATA_PATH }}" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            ONLY_ACTIVE_ARCH=NO \
+            PRODUCT_BUNDLE_IDENTIFIER=com.custom.player \
+            2>&1 | xcpretty --color --simple || \
+          xcodebuild build \
+            $BUILD_FLAG "$BUILD_PATH" \
+            -scheme "${{ env.SCHEME }}" \
+            -configuration "${{ env.CONFIGURATION }}" \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "${{ env.DERIVED_DATA_PATH }}" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            ONLY_ACTIVE_ARCH=NO \
+            PRODUCT_BUNDLE_IDENTIFIER=com.custom.player
+
+      # ── 13. Locate .app bundle ────────────────────────────────────────────
+      - name: Locate .app bundle
+        id: locate_app
+        run: |
+          APP_PATH=$(find "${{ env.DERIVED_DATA_PATH }}" \
+            -type d -name "${{ env.APP_NAME }}.app" 2>/dev/null | head -n 1)
+
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: .app not found. DerivedData contents:"
+            find "${{ env.DERIVED_DATA_PATH }}" -maxdepth 6 -name "*.app" 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Found: $APP_PATH"
+          echo "app_path=$APP_PATH" >> $GITHUB_OUTPUT
+
+      # ── 14. Package IPA ───────────────────────────────────────────────────
+      - name: Package unsigned IPA
+        run: |
+          APP_PATH="${{ steps.locate_app.outputs.app_path }}"
+          mkdir -p "${{ env.IPA_OUTPUT_DIR }}/Payload"
+
+          cp -R "$APP_PATH" "${{ env.IPA_OUTPUT_DIR }}/Payload/${{ env.APP_NAME }}.app"
+
+          cd "${{ env.IPA_OUTPUT_DIR }}"
+          zip -r "${{ env.APP_NAME }}.ipa" "Payload/" \
+            --exclude "*.DS_Store" --exclude "__MACOSX" -q
+
+          echo "IPA size: $(du -sh ${{ env.APP_NAME }}.ipa | cut -f1)"
+
+          # Validate ZIP structure
+          python3 -c "
+          import zipfile, sys
+          path = '${{ env.IPA_OUTPUT_DIR }}/${{ env.APP_NAME }}.ipa'
+          with zipfile.ZipFile(path) as z:
+              payload = [n for n in z.namelist() if n.startswith('Payload/')]
+              print(f'IPA valid ✓  ({len(z.namelist())} entries, {len(payload)} under Payload/)')
+          "
+
+      # ── 15. Upload artifact ───────────────────────────────────────────────
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CustomPlayer-unsigned-ipa
+          path: ${{ env.IPA_OUTPUT_DIR }}/${{ env.APP_NAME }}.ipa
+          retention-days: 30
+          if-no-files-found: error
+
+      # ── 16. Summary ───────────────────────────────────────────────────────
+      - name: Build summary
+        if: always()
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  CustomPlayer — Build Summary"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Runner:   macos-14 (GitHub-hosted)"
+          echo "  Scheme:   ${{ env.SCHEME }}"
+          echo "  SDK:      iphoneos arm64 (unsigned)"
+          echo "  Sources:  App / ContentView / Track / TrackManagerView / FileManager+Sandbox"
+          IPA="${{ env.IPA_OUTPUT_DIR }}/${{ env.APP_NAME }}.ipa"
+          if [ -f "$IPA" ]; then
+            echo "  IPA:      $(du -sh $IPA | cut -f1)  ✓ SUCCESS"
+          else
+            echo "  IPA:      NOT PRODUCED  ✗ FAILED"
+          fi
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
