@@ -1,16 +1,15 @@
 import ProjectDescription
 
-// MARK: - Custom Player — Tuist Project Manifest
-// Compatible with Tuist 4.x
-// Run `tuist generate` to produce CustomPlayer.xcodeproj
+// MARK: - CustomPlayer — Tuist Project Manifest
+// Compatible with Tuist 4.x (any minor version)
+// Fixes: SourceFileGlob initializer, removed environment:, removed
+//        findImplicitDependencies:, removed ProfileActionOptions
 
-let deploymentTargets = DeploymentTargets.iOS("16.0")
-
-let infoPlistEntries: [String: Plist.Value] = [
-    "CFBundleDisplayName": "Custom Player",
-    "CFBundleShortVersionString": "1.0.0",
-    "CFBundleVersion": "1",
-    "UILaunchStoryboardName": "",
+let infoPlist: [String: Plist.Value] = [
+    "CFBundleDisplayName":            "Custom Player",
+    "CFBundleShortVersionString":     "1.0.0",
+    "CFBundleVersion":                "1",
+    "UILaunchStoryboardName":         "",
     "UISupportedInterfaceOrientations": [
         "UIInterfaceOrientationPortrait"
     ],
@@ -20,55 +19,47 @@ let infoPlistEntries: [String: Plist.Value] = [
         "UIInterfaceOrientationLandscapeLeft",
         "UIInterfaceOrientationLandscapeRight"
     ],
-    "NSMicrophoneUsageDescription": "This app does not use the microphone.",
-    "UIRequiresFullScreen": true,
-    "UIStatusBarStyle": "UIStatusBarStyleLightContent",
+    "UIRequiresFullScreen":                     true,
+    "UIStatusBarStyle":                         "UIStatusBarStyleLightContent",
     "UIViewControllerBasedStatusBarAppearance": false,
-    "AVAudioSessionCategory": "AVAudioSessionCategoryPlayback",
-    "UIBackgroundModes": ["audio"],
+    "NSMicrophoneUsageDescription":             "This app does not use the microphone.",
+    "UIBackgroundModes":                        ["audio"],
+    "AVAudioSessionCategory":                   "AVAudioSessionCategoryPlayback",
     "NSAppTransportSecurity": [
         "NSAllowsArbitraryLoads": false
     ]
 ]
 
+let baseSettings: SettingsDictionary = [
+    "SWIFT_VERSION":                        "5.9",
+    "IPHONEOS_DEPLOYMENT_TARGET":           "16.0",
+    "PRODUCT_BUNDLE_IDENTIFIER":            "com.custom.player",
+    "PRODUCT_NAME":                         "CustomPlayer",
+    "TARGETED_DEVICE_FAMILY":               "1,2",
+    "ENABLE_BITCODE":                       false,
+    "CODE_SIGNING_ALLOWED":                 false,
+    "CODE_SIGNING_REQUIRED":                false,
+    "CODE_SIGN_IDENTITY":                   "",
+    "PROVISIONING_PROFILE_SPECIFIER":       "",
+    "ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES": true,
+    "ASSETCATALOG_COMPILER_APPICON_NAME":   "AppIcon",
+    "DEVELOPMENT_LANGUAGE":                 "en",
+]
+
 let settings = Settings.settings(
-    base: [
-        "SWIFT_VERSION": "5.9",
-        "IPHONEOS_DEPLOYMENT_TARGET": "16.0",
-        "PRODUCT_BUNDLE_IDENTIFIER": "com.custom.player",
-        "PRODUCT_NAME": "CustomPlayer",
-        "TARGETED_DEVICE_FAMILY": "1,2",
-        "ENABLE_BITCODE": false,
-        "CODE_SIGNING_ALLOWED": false,
-        "CODE_SIGNING_REQUIRED": false,
-        "CODE_SIGN_IDENTITY": "",
-        "PROVISIONING_PROFILE_SPECIFIER": "",
-        "ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES": true,
-        "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "DEBUG",
-        "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
-        "DEVELOPMENT_LANGUAGE": "en",
-        "MTL_ENABLE_DEBUG_INFO": "INCLUDE_SOURCE",
-    ],
+    base: baseSettings,
     configurations: [
-        .debug(
-            name: "Debug",
-            settings: [
-                "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "DEBUG",
-                "DEBUG_INFORMATION_FORMAT": "dwarf-with-dsym",
-                "ONLY_ACTIVE_ARCH": true,
-            ],
-            xcconfig: nil
-        ),
-        .release(
-            name: "Release",
-            settings: [
-                "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "",
-                "DEBUG_INFORMATION_FORMAT": "dwarf-with-dsym",
-                "ONLY_ACTIVE_ARCH": false,
-                "SWIFT_OPTIMIZATION_LEVEL": "-Owholemodule",
-            ],
-            xcconfig: nil
-        ),
+        .debug(name: "Debug", settings: [
+            "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "DEBUG",
+            "DEBUG_INFORMATION_FORMAT":            "dwarf-with-dsym",
+            "ONLY_ACTIVE_ARCH":                    true,
+        ]),
+        .release(name: "Release", settings: [
+            "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "",
+            "DEBUG_INFORMATION_FORMAT":            "dwarf-with-dsym",
+            "ONLY_ACTIVE_ARCH":                    false,
+            "SWIFT_OPTIMIZATION_LEVEL":            "-Owholemodule",
+        ]),
     ],
     defaultSettings: .recommended
 )
@@ -78,29 +69,15 @@ let appTarget = Target.target(
     destinations: [.iPhone, .iPad],
     product: .app,
     bundleId: "com.custom.player",
-    deploymentTargets: deploymentTargets,
-    infoPlist: .extendingDefault(with: infoPlistEntries),
-    sources: [
-        SourceFileGlob(
-            glob: "Sources/**/*.swift",
-            excluding: [],
-            compilerFlags: nil,
-            codeGen: nil
-        )
-    ],
-    resources: [
-        ResourceFileElement.glob(
-            pattern: "Resources/**",
-            tags: [],
-            inclusionCondition: nil
-        )
-    ],
+    deploymentTargets: .iOS("16.0"),
+    infoPlist: .extendingDefault(with: infoPlist),
+    sources: ["Sources/**/*.swift"],
+    resources: ["Resources/**"],
     entitlements: nil,
     scripts: [],
     dependencies: [],
     settings: settings,
     coreDataModels: [],
-    environment: [:],
     launchArguments: [],
     additionalFiles: []
 )
@@ -108,98 +85,34 @@ let appTarget = Target.target(
 let project = Project(
     name: "CustomPlayer",
     organizationName: "com.custom",
-    options: Project.Options.options(
-        automaticSchemesOptions: .enabled(
-            targetSchemesGrouping: .byNameSuffix(build: [], test: ["Tests"], run: []),
-            codeCoverageEnabled: false,
-            testingOptions: [],
-            testLanguage: nil,
-            testRegion: nil,
-            testScreenCaptureFormat: .screenshots,
-            runLanguage: nil,
-            runRegion: nil
-        ),
+    options: .options(
+        automaticSchemesOptions: .disabled,
         disableBundleAccessors: false,
-        disableShowEnvironmentVarsInScriptPhases: false,
-        disableSynthesizedResourceAccessors: false,
-        textSettings: .textSettings(
-            usesTabs: nil,
-            indentWidth: nil,
-            tabWidth: nil,
-            wrapsLines: nil
-        )
+        disableSynthesizedResourceAccessors: false
     ),
     packages: [],
     settings: settings,
     targets: [appTarget],
     schemes: [
-        Scheme.scheme(
+        .scheme(
             name: "CustomPlayer",
             shared: true,
-            hidden: false,
-            buildAction: BuildAction.buildAction(
-                targets: [TargetReference(stringLiteral: "CustomPlayer")],
-                preActions: [],
-                postActions: [],
-                runPostActionsOnFailure: false,
-                findImplicitDependencies: true
-            ),
-            testAction: TestAction.targets(
-                [],
-                arguments: nil,
+            buildAction: .buildAction(targets: ["CustomPlayer"]),
+            testAction: nil,
+            runAction: .runAction(
                 configuration: .debug,
-                attachDebugger: false,
-                expandVariableFromTarget: nil,
-                preActions: [],
-                postActions: [],
-                options: TestActionOptions.options(),
-                diagnosticsOptions: .options(
-                    addressSanitizerEnabled: false,
-                    detectStackUseAfterReturnEnabled: false,
-                    threadSanitizerEnabled: false,
-                    mainThreadCheckerEnabled: false,
-                    performanceAntipatternCheckerEnabled: false
-                )
+                executable: "CustomPlayer"
             ),
-            runAction: RunAction.runAction(
-                configuration: .debug,
-                attachDebugger: true,
-                customLLDBInitFile: nil,
-                preActions: [],
-                postActions: [],
-                executable: TargetReference(stringLiteral: "CustomPlayer"),
-                arguments: nil,
-                options: RunActionOptions.options(),
-                diagnosticsOptions: .options(
-                    addressSanitizerEnabled: false,
-                    detectStackUseAfterReturnEnabled: false,
-                    threadSanitizerEnabled: false,
-                    mainThreadCheckerEnabled: false,
-                    performanceAntipatternCheckerEnabled: false
-                ),
-                expandVariableFromTarget: nil
-            ),
-            archiveAction: ArchiveAction.archiveAction(
+            archiveAction: .archiveAction(
                 configuration: .release,
                 revealArchiveInOrganizer: true,
-                customArchiveName: "CustomPlayer",
-                preActions: [],
-                postActions: []
+                customArchiveName: "CustomPlayer"
             ),
-            profileAction: ProfileAction.profileAction(
+            profileAction: .profileAction(
                 configuration: .release,
-                executable: TargetReference(stringLiteral: "CustomPlayer"),
-                arguments: nil,
-                preActions: [],
-                postActions: [],
-                options: ProfileActionOptions.options(
-                    storeKitConfigurationPath: nil,
-                    simulatedLocation: nil
-                )
+                executable: "CustomPlayer"
             ),
-            analyzeAction: AnalyzeAction.analyzeAction(
-                configuration: .debug
-            )
+            analyzeAction: .analyzeAction(configuration: .debug)
         )
     ],
     additionalFiles: [],
