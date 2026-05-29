@@ -1,9 +1,10 @@
-# ──────────────────────────────────────────────────────────────────────────────
-# CustomPlayer — Unsigned IPA Cloud Build
-# Builds: ContentView.swift, ContentView+Player, Track.swift,
-#         TrackManagerView.swift, FileManager+Sandbox.swift, App.swift
-# Output: CustomPlayer.ipa (unsigned, sideloadable via AltStore / Sideloadly)
-# ──────────────────────────────────────────────────────────────────────────────
+# =============================================================================
+# CustomPlayer — Unsigned IPA Cloud Build Pipeline
+# Strategy: build_init.sh generates the Xcode project from scratch in the
+# runner (no Tuist, no CocoaPods, no local Mac needed). xcodebuild compiles
+# an unsigned arm64 device binary. The IPA is validated for size before
+# upload to guarantee it is never an empty artifact.
+# =============================================================================
 
 name: Build Unsigned IPA
 
@@ -15,308 +16,293 @@ on:
   workflow_dispatch:
 
 env:
-  SCHEME:               "CustomPlayer"
-  CONFIGURATION:        "Debug"
-  DERIVED_DATA_PATH:    "${{ github.workspace }}/DerivedData"
-  IPA_OUTPUT_DIR:       "${{ github.workspace }}/output"
-  APP_NAME:             "CustomPlayer"
+  PROJECT_NAME:        "CustomPlayer"
+  SCHEME_NAME:         "CustomPlayer"
+  BUNDLE_ID:           "com.custom.player"
+  BUILD_CONFIG:        "Release"
+  DERIVED_DATA:        "${{ github.workspace }}/DerivedData"
+  ARCHIVE_PATH:        "${{ github.workspace }}/build/CustomPlayer.xcarchive"
+  IPA_DIR:             "${{ github.workspace }}/output"
+  IPA_NAME:            "CustomPlayer.ipa"
+  MIN_APP_SIZE_BYTES:  "500000"
 
 jobs:
   build-unsigned-ipa:
-    name: Generate → Build → Package Unsigned IPA
+    name: Bootstrap → Compile → Package → Upload
     runs-on: macos-14
+    timeout-minutes: 60
 
     steps:
-      # ── 1. Checkout ────────────────────────────────────────────────────────
+
+      # ── Step 1: Checkout ──────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ── 2. Select Xcode 15 ────────────────────────────────────────────────
-      - name: Select Xcode 15
+      # ── Step 2: Select Xcode ──────────────────────────────────────────────
+      - name: Select latest available Xcode 15.x
         run: |
-          XCODE_PATH=$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)
-          echo "Xcode path: $XCODE_PATH"
-          sudo xcode-select --switch "$XCODE_PATH"
+          echo "Available Xcode installations:"
+          ls /Applications/Xcode*.app 2>/dev/null | sort -V || true
+
+          XCODE=$(ls -d /Applications/Xcode_15*.app 2>/dev/null | sort -V | tail -n1 \
+               || ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -n1)
+
+          if [ -z "$XCODE" ]; then
+            echo "ERROR: No Xcode installation found"
+            exit 1
+          fi
+
+          echo "Selecting: $XCODE"
+          sudo xcode-select --switch "$XCODE"
           xcodebuild -version
           swift --version
 
-      # ── 3. Install mise ───────────────────────────────────────────────────
-      - name: Install mise
-        run: |
-          curl -fsSL https://mise.run | sh
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-          echo "$HOME/.local/share/mise/shims" >> $GITHUB_PATH
+          # Accept licence silently — required on fresh runners
+          sudo xcodebuild -license accept || true
 
-      # ── 4. Write .mise.toml if absent ─────────────────────────────────────
-      - name: Create .mise.toml if absent
+      # ── Step 3: Run build_init.sh (project bootstrap) ─────────────────────
+      - name: Bootstrap Xcode project via build_init.sh
         run: |
-          if [ ! -f .mise.toml ] && [ ! -f .tuist-version ]; then
-            printf '[tools]\ntuist = "4.20.0"\n' > .mise.toml
-            echo ".mise.toml created"
-          else
-            echo ".mise.toml / .tuist-version already present"
-          fi
+          chmod +x "${{ github.workspace }}/build_init.sh"
+          bash "${{ github.workspace }}/build_init.sh"
 
-      # ── 5. Install Tuist via mise ─────────────────────────────────────────
-      - name: Install Tuist via mise
+      # ── Step 4: Verify project is valid before building ───────────────────
+      - name: Verify Xcode project integrity
         run: |
-          mise install
-          mise reshim
-          mise exec -- tuist version
+          PROJ="${{ github.workspace }}/${{ env.PROJECT_NAME }}.xcodeproj"
 
-      # ── 6. Ensure App.swift entry point exists ────────────────────────────
-      # Required: Tuist Sources/**/*.swift glob must include @main
-      - name: Ensure App.swift exists
-        run: |
-          APPMAIN="$GITHUB_WORKSPACE/Sources/App.swift"
-          if [ ! -f "$APPMAIN" ]; then
-            echo "App.swift not found — generating entry point"
-            mkdir -p "$GITHUB_WORKSPACE/Sources"
-            cat > "$APPMAIN" << 'SWIFT'
-          import SwiftUI
-          @main
-          struct CustomPlayerApp: App {
-              var body: some Scene {
-                  WindowGroup { ContentView() }
-              }
-          }
-          SWIFT
-            echo "App.swift created"
-          else
-            echo "App.swift already present:"
-            cat "$APPMAIN"
-          fi
-
-      # ── 7. Verify all required Swift source files ─────────────────────────
-      - name: Verify source files
-        run: |
-          echo "Sources directory:"
-          ls -lh "$GITHUB_WORKSPACE/Sources/"
-          REQUIRED=("App.swift" "ContentView.swift" "Track.swift" "TrackManagerView.swift" "FileManager+Sandbox.swift")
-          for f in "${REQUIRED[@]}"; do
-            if [ -f "$GITHUB_WORKSPACE/Sources/$f" ]; then
-              echo "  ✓ $f"
-            else
-              echo "  ✗ MISSING: $f"
-            fi
-          done
-
-      # ── 8. Tuist fetch/resolve dependencies ───────────────────────────────
-      - name: Tuist install (resolve dependencies)
-        run: |
-          mise exec -- tuist install --path "$GITHUB_WORKSPACE" || true
-
-      # ── 9. Tuist generate ─────────────────────────────────────────────────
-      - name: Tuist generate
-        run: |
-          mise exec -- tuist generate \
-            --path "$GITHUB_WORKSPACE" \
-            --no-open
-          echo "Workspace / project files generated:"
-          ls -la "$GITHUB_WORKSPACE"
-
-      # ── 10. Resolve workspace or project path ─────────────────────────────
-      - name: Resolve build target path
-        id: resolve_target
-        run: |
-          WORKSPACE="$GITHUB_WORKSPACE/${{ env.APP_NAME }}.xcworkspace"
-          PROJECT="$GITHUB_WORKSPACE/${{ env.APP_NAME }}.xcodeproj"
-
-          if [ -d "$WORKSPACE" ] || [ -f "$WORKSPACE" ]; then
-            echo "Using workspace: $WORKSPACE"
-            echo "build_flag=-workspace" >> $GITHUB_OUTPUT
-            echo "build_path=$WORKSPACE" >> $GITHUB_OUTPUT
-          elif [ -d "$PROJECT" ]; then
-            echo "Using project: $PROJECT"
-            echo "build_flag=-project" >> $GITHUB_OUTPUT
-            echo "build_path=$PROJECT" >> $GITHUB_OUTPUT
-          else
-            echo "ERROR: No .xcworkspace or .xcodeproj found"
-            ls -la "$GITHUB_WORKSPACE"
+          if [ ! -d "$PROJ" ]; then
+            echo "ERROR: $PROJ does not exist after build_init.sh"
+            ls -la "${{ github.workspace }}"
             exit 1
           fi
 
-          # List available schemes
-          xcodebuild \
-            "${{ steps.resolve_target.outputs.build_flag || '-workspace' }}" \
-            "${{ steps.resolve_target.outputs.build_path || '$GITHUB_WORKSPACE/CustomPlayer.xcworkspace' }}" \
-            -list 2>/dev/null || true
+          echo "Project file exists:"
+          ls -lh "$PROJ/project.pbxproj"
 
-      # ── 11. Ensure Resources placeholder assets exist ─────────────────────
-      - name: Create placeholder Resources (if missing)
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/Resources"
+          echo "Available schemes:"
+          xcodebuild -project "$PROJ" -list
 
-          # music.mp3 — minimal valid ID3 + silent MP3 frame
-          if [ ! -f "$GITHUB_WORKSPACE/Resources/music.mp3" ]; then
-            python3 - << 'PYEOF'
-          import struct, zlib, os
-          ws = os.environ.get("GITHUB_WORKSPACE", "")
-          path = os.path.join(ws, "Resources", "music.mp3")
-          id3  = b'ID3\x03\x00\x00\x00\x00\x00\x00'
-          frame = b'\xff\xfb\x90\x00' + b'\x00' * 413
-          open(path, 'wb').write(id3 + frame)
-          print(f"Stub music.mp3 → {path}")
-          PYEOF
-          fi
-
-          # haptic.ahap — minimal valid JSON pattern
-          if [ ! -f "$GITHUB_WORKSPACE/Resources/haptic.ahap" ]; then
-            cat > "$GITHUB_WORKSPACE/Resources/haptic.ahap" << 'AHAP'
-          {
-            "Version": 1.0,
-            "Metadata": { "Project": "CustomPlayer" },
-            "Pattern": [
-              {
-                "Event": {
-                  "Time": 0.0,
-                  "EventType": "HapticTransient",
-                  "EventParameters": [
-                    { "ParameterID": "HapticIntensity",  "ParameterValue": 0.5 },
-                    { "ParameterID": "HapticSharpness",  "ParameterValue": 0.5 }
-                  ]
-                }
-              }
-            ]
-          }
-          AHAP
-          fi
-
-          # cover.png — 1x1 dark-maroon PNG
-          if [ ! -f "$GITHUB_WORKSPACE/Resources/cover.png" ]; then
-            python3 - << 'PYEOF'
-          import struct, zlib, os
-          def png_1x1(r,g,b):
-              def chunk(t,d): c=struct.pack(">I",len(d))+t+d; return c+struct.pack(">I",zlib.crc32(t+d)&0xFFFFFFFF)
-              return (b'\x89PNG\r\n\x1a\n'
-                      + chunk(b'IHDR', struct.pack(">IIBBBBB",1,1,8,2,0,0,0))
-                      + chunk(b'IDAT', zlib.compress(bytes([0,r,g,b])))
-                      + chunk(b'IEND', b''))
-          ws   = os.environ.get("GITHUB_WORKSPACE","")
-          path = os.path.join(ws,"Resources","cover.png")
-          open(path,'wb').write(png_1x1(80,10,30))
-          print(f"Stub cover.png → {path}")
-          PYEOF
-          fi
+          echo "Sources:"
+          ls -lh "${{ github.workspace }}/Sources/"
 
           echo "Resources:"
-          ls -lh "$GITHUB_WORKSPACE/Resources/"
+          ls -lh "${{ github.workspace }}/Resources/"
 
-      # ── 12. xcodebuild — unsigned device build ────────────────────────────
-      - name: Build unsigned .app
+      # ── Step 5: Build .app (unsigned) ─────────────────────────────────────
+      # We use 'build' action (not 'archive') as first pass to catch compiler
+      # errors cheaply before the longer archive phase.
+      - name: Compile unsigned .app (build pass)
         run: |
-          gem install xcpretty --no-document --quiet 2>/dev/null || true
-          mkdir -p "${{ env.DERIVED_DATA_PATH }}"
+          PROJ="${{ github.workspace }}/${{ env.PROJECT_NAME }}.xcodeproj"
+          mkdir -p "${{ env.DERIVED_DATA }}"
 
-          BUILD_FLAG="${{ steps.resolve_target.outputs.build_flag }}"
-          BUILD_PATH="${{ steps.resolve_target.outputs.build_path }}"
+          set -o pipefail
+          xcodebuild build \
+            -project        "$PROJ" \
+            -scheme         "${{ env.SCHEME_NAME }}" \
+            -configuration  "${{ env.BUILD_CONFIG }}" \
+            -sdk            iphoneos \
+            -destination    "generic/platform=iOS" \
+            -derivedDataPath "${{ env.DERIVED_DATA }}" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            ONLY_ACTIVE_ARCH=NO \
+            PRODUCT_BUNDLE_IDENTIFIER="${{ env.BUNDLE_ID }}" \
+            SKIP_INSTALL=NO \
+            2>&1 | tee /tmp/build_output.txt | \
+            grep -E "(error:|warning:|Build succeeded|FAILED|note:)" || true
 
-          # Fallback if step outputs are empty (rare race on first run)
-          if [ -z "$BUILD_FLAG" ]; then
-            WS="$GITHUB_WORKSPACE/${{ env.APP_NAME }}.xcworkspace"
-            PROJ="$GITHUB_WORKSPACE/${{ env.APP_NAME }}.xcodeproj"
-            if [ -d "$WS" ] || [ -f "$WS" ]; then
-              BUILD_FLAG="-workspace"; BUILD_PATH="$WS"
-            else
-              BUILD_FLAG="-project";   BUILD_PATH="$PROJ"
-            fi
+          # Surface the last 60 lines if the build failed
+          if grep -q "** BUILD FAILED **" /tmp/build_output.txt; then
+            echo ""
+            echo "═══ LAST 80 LINES OF BUILD LOG ═══"
+            tail -n 80 /tmp/build_output.txt
+            exit 1
           fi
+          echo "✓ Build pass succeeded"
 
-          echo "Building with: $BUILD_FLAG $BUILD_PATH"
-
-          xcodebuild build \
-            $BUILD_FLAG "$BUILD_PATH" \
-            -scheme "${{ env.SCHEME }}" \
-            -configuration "${{ env.CONFIGURATION }}" \
-            -sdk iphoneos \
-            -destination "generic/platform=iOS" \
-            -derivedDataPath "${{ env.DERIVED_DATA_PATH }}" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            ONLY_ACTIVE_ARCH=NO \
-            PRODUCT_BUNDLE_IDENTIFIER=com.custom.player \
-            2>&1 | xcpretty --color --simple || \
-          xcodebuild build \
-            $BUILD_FLAG "$BUILD_PATH" \
-            -scheme "${{ env.SCHEME }}" \
-            -configuration "${{ env.CONFIGURATION }}" \
-            -sdk iphoneos \
-            -destination "generic/platform=iOS" \
-            -derivedDataPath "${{ env.DERIVED_DATA_PATH }}" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            ONLY_ACTIVE_ARCH=NO \
-            PRODUCT_BUNDLE_IDENTIFIER=com.custom.player
-
-      # ── 13. Locate .app bundle ────────────────────────────────────────────
-      - name: Locate .app bundle
-        id: locate_app
+      # ── Step 6: Archive (produces .xcarchive with embedded .app) ──────────
+      - name: Archive unsigned .xcarchive
         run: |
-          APP_PATH=$(find "${{ env.DERIVED_DATA_PATH }}" \
-            -type d -name "${{ env.APP_NAME }}.app" 2>/dev/null | head -n 1)
+          PROJ="${{ github.workspace }}/${{ env.PROJECT_NAME }}.xcodeproj"
+          mkdir -p "$(dirname '${{ env.ARCHIVE_PATH }}')"
 
-          if [ -z "$APP_PATH" ]; then
-            echo "ERROR: .app not found. DerivedData contents:"
-            find "${{ env.DERIVED_DATA_PATH }}" -maxdepth 6 -name "*.app" 2>/dev/null || true
+          set -o pipefail
+          xcodebuild archive \
+            -project        "$PROJ" \
+            -scheme         "${{ env.SCHEME_NAME }}" \
+            -configuration  "${{ env.BUILD_CONFIG }}" \
+            -sdk            iphoneos \
+            -destination    "generic/platform=iOS" \
+            -archivePath    "${{ env.ARCHIVE_PATH }}" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            ONLY_ACTIVE_ARCH=NO \
+            PRODUCT_BUNDLE_IDENTIFIER="${{ env.BUNDLE_ID }}" \
+            SKIP_INSTALL=NO \
+            2>&1 | tee /tmp/archive_output.txt | \
+            grep -E "(error:|warning:|ARCHIVE SUCCEEDED|FAILED)" || true
+
+          if grep -q "** ARCHIVE FAILED **" /tmp/archive_output.txt; then
+            echo ""
+            echo "═══ LAST 80 LINES OF ARCHIVE LOG ═══"
+            tail -n 80 /tmp/archive_output.txt
             exit 1
           fi
 
-          echo "Found: $APP_PATH"
-          echo "app_path=$APP_PATH" >> $GITHUB_OUTPUT
+          echo "✓ Archive succeeded"
+          echo "Archive contents:"
+          find "${{ env.ARCHIVE_PATH }}" -maxdepth 4 | sort
 
-      # ── 14. Package IPA ───────────────────────────────────────────────────
-      - name: Package unsigned IPA
+      # ── Step 7: Locate the compiled .app binary ────────────────────────────
+      - name: Locate .app bundle (archive + derived data fallback)
+        id: locate_app
+        run: |
+          # Primary: inside the .xcarchive Products/Applications/
+          APP_PATH=$(find "${{ env.ARCHIVE_PATH }}" \
+            -type d -name "${{ env.PROJECT_NAME }}.app" 2>/dev/null | head -n1)
+
+          # Fallback: anywhere in DerivedData (catches build-only runs)
+          if [ -z "$APP_PATH" ]; then
+            APP_PATH=$(find "${{ env.DERIVED_DATA }}" \
+              -type d -name "${{ env.PROJECT_NAME }}.app" 2>/dev/null | head -n1)
+          fi
+
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: .app bundle not found in archive or DerivedData"
+            echo "Archive tree:"
+            find "${{ env.ARCHIVE_PATH }}" 2>/dev/null | sort || true
+            echo "DerivedData top-level:"
+            find "${{ env.DERIVED_DATA }}" -maxdepth 5 -name "*.app" 2>/dev/null | sort || true
+            exit 1
+          fi
+
+          echo "Found .app: $APP_PATH"
+
+          # Measure the .app to ensure it's not an empty shell
+          APP_SIZE=$(du -sk "$APP_PATH" | awk '{print $1}')
+          APP_SIZE_BYTES=$(( APP_SIZE * 1024 ))
+          echo "  .app size: ${APP_SIZE}KB (${APP_SIZE_BYTES} bytes)"
+
+          if [ "$APP_SIZE_BYTES" -lt "${{ env.MIN_APP_SIZE_BYTES }}" ]; then
+            echo "ERROR: .app is too small ($APP_SIZE_BYTES bytes < ${{ env.MIN_APP_SIZE_BYTES }} bytes minimum)"
+            echo "This usually means the binary is an empty debug stub."
+            echo ".app contents:"
+            ls -lh "$APP_PATH/"
+            exit 1
+          fi
+
+          echo "  ✓ .app passes size guard"
+          echo "app_path=$APP_PATH" >> $GITHUB_OUTPUT
+          echo "app_size_kb=$APP_SIZE" >> $GITHUB_OUTPUT
+
+      # ── Step 8: Package IPA with strict size validation ───────────────────
+      - name: Package unsigned IPA with size guard
+        id: package_ipa
         run: |
           APP_PATH="${{ steps.locate_app.outputs.app_path }}"
-          mkdir -p "${{ env.IPA_OUTPUT_DIR }}/Payload"
+          mkdir -p "${{ env.IPA_DIR }}/Payload"
 
-          cp -R "$APP_PATH" "${{ env.IPA_OUTPUT_DIR }}/Payload/${{ env.APP_NAME }}.app"
+          echo "Copying .app into Payload/..."
+          cp -R "$APP_PATH" "${{ env.IPA_DIR }}/Payload/${{ env.PROJECT_NAME }}.app"
 
-          cd "${{ env.IPA_OUTPUT_DIR }}"
-          zip -r "${{ env.APP_NAME }}.ipa" "Payload/" \
-            --exclude "*.DS_Store" --exclude "__MACOSX" -q
+          # Verify Payload/.app size before zipping
+          PAYLOAD_SIZE_KB=$(du -sk "${{ env.IPA_DIR }}/Payload" | awk '{print $1}')
+          PAYLOAD_SIZE_BYTES=$(( PAYLOAD_SIZE_KB * 1024 ))
+          echo "Payload/ size: ${PAYLOAD_SIZE_KB}KB"
 
-          echo "IPA size: $(du -sh ${{ env.APP_NAME }}.ipa | cut -f1)"
+          if [ "$PAYLOAD_SIZE_BYTES" -lt "${{ env.MIN_APP_SIZE_BYTES }}" ]; then
+            echo "ERROR: Payload/ directory is too small (${PAYLOAD_SIZE_KB}KB)"
+            echo "The .app was not copied correctly."
+            ls -lhR "${{ env.IPA_DIR }}/Payload/"
+            exit 1
+          fi
 
-          # Validate ZIP structure
-          python3 -c "
+          echo "  ✓ Payload/ passes size guard (${PAYLOAD_SIZE_KB}KB)"
+
+          # Zip into .ipa
+          cd "${{ env.IPA_DIR }}"
+          zip -r "${{ env.IPA_NAME }}" "Payload/" \
+            --exclude "*.DS_Store" --exclude "__MACOSX/*" -q
+
+          IPA_PATH="${{ env.IPA_DIR }}/${{ env.IPA_NAME }}"
+          IPA_SIZE_KB=$(du -sk "$IPA_PATH" | awk '{print $1}')
+          echo "IPA size: ${IPA_SIZE_KB}KB"
+
+          # Validate the IPA ZIP structure via Python
+          python3 - << PYEOF
           import zipfile, sys
-          path = '${{ env.IPA_OUTPUT_DIR }}/${{ env.APP_NAME }}.ipa'
-          with zipfile.ZipFile(path) as z:
-              payload = [n for n in z.namelist() if n.startswith('Payload/')]
-              print(f'IPA valid ✓  ({len(z.namelist())} entries, {len(payload)} under Payload/)')
-          "
 
-      # ── 15. Upload artifact ───────────────────────────────────────────────
+          ipa = "$IPA_PATH"
+          min_bytes = ${{ env.MIN_APP_SIZE_BYTES }}
+
+          try:
+              with zipfile.ZipFile(ipa, 'r') as z:
+                  names = z.namelist()
+                  total_size = sum(i.file_size for i in z.infolist())
+                  payload_entries = [n for n in names if n.startswith('Payload/')]
+                  binary_entries  = [n for n in names if n.endswith('/${{ env.PROJECT_NAME }}') or '/${{ env.PROJECT_NAME }}.app/' in n]
+
+                  print(f"  IPA entries     : {len(names)}")
+                  print(f"  Payload entries : {len(payload_entries)}")
+                  print(f"  Uncompressed    : {total_size:,} bytes")
+
+                  if not payload_entries:
+                      print("ERROR: No Payload/ entries in IPA ZIP", file=sys.stderr)
+                      sys.exit(1)
+
+                  if total_size < min_bytes:
+                      print(f"ERROR: IPA uncompressed size {total_size} < {min_bytes} minimum", file=sys.stderr)
+                      sys.exit(1)
+
+                  print(f"  ✓ IPA structure valid")
+          except zipfile.BadZipFile as e:
+              print(f"ERROR: Invalid ZIP file: {e}", file=sys.stderr)
+              sys.exit(1)
+          PYEOF
+
+          echo "ipa_path=$IPA_PATH"     >> $GITHUB_OUTPUT
+          echo "ipa_size_kb=$IPA_SIZE_KB" >> $GITHUB_OUTPUT
+
+      # ── Step 9: Upload artifact ───────────────────────────────────────────
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: CustomPlayer-unsigned-ipa
-          path: ${{ env.IPA_OUTPUT_DIR }}/${{ env.APP_NAME }}.ipa
+          path: ${{ env.IPA_DIR }}/${{ env.IPA_NAME }}
           retention-days: 30
           if-no-files-found: error
 
-      # ── 16. Summary ───────────────────────────────────────────────────────
+      # ── Step 10: Build Summary ────────────────────────────────────────────
       - name: Build summary
         if: always()
         run: |
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "  CustomPlayer — Build Summary"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "  Runner:   macos-14 (GitHub-hosted)"
-          echo "  Scheme:   ${{ env.SCHEME }}"
-          echo "  SDK:      iphoneos arm64 (unsigned)"
-          echo "  Sources:  App / ContentView / Track / TrackManagerView / FileManager+Sandbox"
-          IPA="${{ env.IPA_OUTPUT_DIR }}/${{ env.APP_NAME }}.ipa"
-          if [ -f "$IPA" ]; then
-            echo "  IPA:      $(du -sh $IPA | cut -f1)  ✓ SUCCESS"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          printf "  %-20s %s\n" "Runner:"    "macos-14 (GitHub-hosted)"
+          printf "  %-20s %s\n" "Scheme:"    "${{ env.SCHEME_NAME }}"
+          printf "  %-20s %s\n" "Config:"    "${{ env.BUILD_CONFIG }}"
+          printf "  %-20s %s\n" "SDK:"       "iphoneos arm64 (unsigned)"
+          printf "  %-20s %s\n" "Bundle ID:" "${{ env.BUNDLE_ID }}"
+          APP_SIZE="${{ steps.locate_app.outputs.app_size_kb }}"
+          IPA_SIZE="${{ steps.package_ipa.outputs.ipa_size_kb }}"
+          IPA_PATH="${{ env.IPA_DIR }}/${{ env.IPA_NAME }}"
+          if [ -f "$IPA_PATH" ]; then
+            printf "  %-20s %s\n" ".app size:" "${APP_SIZE}KB"
+            printf "  %-20s %s\n" "IPA size:"  "${IPA_SIZE}KB"
+            printf "  %-20s %s\n" "Result:"    "✓  SUCCESS — download from Artifacts tab"
           else
-            echo "  IPA:      NOT PRODUCED  ✗ FAILED"
+            printf "  %-20s %s\n" "Result:"    "✗  FAILED — check step logs above"
           fi
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
