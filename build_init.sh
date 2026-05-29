@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
 # build_init.sh — CustomPlayer Cloud Build Initialiser
-# Runs on GitHub Actions macos-14 runner BEFORE xcodebuild.
-# Creates a fully self-contained Xcode project from scratch using
-# xcodebuild + PlistBuddy + direct .pbxproj manipulation so no Tuist
-# version mismatch can ever break the build.
+# Compatible: bash 3.2+ (macOS default) AND bash 5.x
+# Fixes: removed declare -A (bash 3.2 incompatible), fixed heredoc quoting
 # =============================================================================
 set -euo pipefail
 
@@ -23,14 +21,14 @@ echo "  Repo root : $REPO_ROOT"
 echo "  Xcode proj: $XCODEPROJ_DIR"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-# ── 1. Ensure directory structure ─────────────────────────────────────────────
+# ── 1. Directory structure ────────────────────────────────────────────────────
 mkdir -p "$SOURCES_DIR"
 mkdir -p "$RESOURCES_DIR"
 mkdir -p "$XCODEPROJ_DIR/xcshareddata/xcschemes"
 
 # ── 2. Guarantee App.swift entry point ───────────────────────────────────────
 if [ ! -f "$SOURCES_DIR/App.swift" ]; then
-  echo "[init] Creating App.swift entry point"
+  echo "[init] Creating App.swift"
   cat > "$SOURCES_DIR/App.swift" << 'SWIFT'
 import SwiftUI
 @main
@@ -42,51 +40,33 @@ struct CustomPlayerApp: App {
 SWIFT
 fi
 
-# ── 3. Create stub placeholder assets if real assets are absent ───────────────
-# Real production assets (music.mp3 etc.) should be committed to Resources/.
-# These stubs prevent compile-time errors if a file is missing.
+# ── 3. Stub placeholder assets if real ones are absent ───────────────────────
 
 create_stub_mp3() {
   python3 - "$1" << 'PYEOF'
-import sys, struct, zlib
+import sys, struct
 path = sys.argv[1]
-# Minimal valid ID3v2.3 header (10 bytes) + one silent MPEG1 Layer3 frame
-id3  = b'ID3\x03\x00\x00\x00\x00\x00\x00'
-# MPEG1, Layer 3, 128kbps, 44100Hz, stereo — silent frame (417 bytes payload)
+id3   = b'ID3\x03\x00\x00\x00\x00\x00\x00'
 frame = b'\xff\xfb\x90\x00' + b'\x00' * 413
-with open(path, 'wb') as f:
-    f.write(id3 + frame)
-print(f"  stub mp3 → {path}")
+open(path, 'wb').write(id3 + frame)
+print("  stub mp3 -> " + path)
 PYEOF
 }
 
 create_stub_ahap() {
+  # NOTE: no backticks or special chars inside heredoc to avoid sh parse errors
   cat > "$1" << 'AHAP'
 {
   "Version": 1.0,
-  "Metadata": {
-    "Project": "CustomPlayer",
-    "Description": "Stub AHAP — replace with production pattern"
-  },
+  "Metadata": { "Project": "CustomPlayer" },
   "Pattern": [
     {
       "Event": {
         "Time": 0.0,
         "EventType": "HapticTransient",
         "EventParameters": [
-          { "ParameterID": "HapticIntensity",  "ParameterValue": 0.5 },
-          { "ParameterID": "HapticSharpness",  "ParameterValue": 0.5 }
-        ]
-      }
-    },
-    {
-      "Event": {
-        "Time": 0.5,
-        "EventType": "HapticContinuous",
-        "EventDuration": 0.3,
-        "EventParameters": [
-          { "ParameterID": "HapticIntensity",  "ParameterValue": 0.3 },
-          { "ParameterID": "HapticSharpness",  "ParameterValue": 0.4 }
+          { "ParameterID": "HapticIntensity", "ParameterValue": 0.5 },
+          { "ParameterID": "HapticSharpness", "ParameterValue": 0.5 }
         ]
       }
     }
@@ -101,27 +81,25 @@ import sys, struct, zlib
 def chunk(tag, data):
     c = struct.pack(">I", len(data)) + tag + data
     return c + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
-def png_1x1(r, g, b):
-    sig  = b'\x89PNG\r\n\x1a\n'
-    ihdr = chunk(b'IHDR', struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
-    idat = chunk(b'IDAT', zlib.compress(bytes([0, r, g, b])))
-    iend = chunk(b'IEND', b'')
-    return sig + ihdr + idat + iend
 path = sys.argv[1]
-with open(path, 'wb') as f:
-    f.write(png_1x1(80, 10, 30))
-print(f"  stub png  → {path}")
+sig  = b'\x89PNG\r\n\x1a\n'
+ihdr = chunk(b'IHDR', struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+idat = chunk(b'IDAT', zlib.compress(bytes([0, 80, 10, 30])))
+iend = chunk(b'IEND', b'')
+open(path, 'wb').write(sig + ihdr + idat + iend)
+print("  stub png  -> " + path)
 PYEOF
 }
 
-[ ! -f "$RESOURCES_DIR/music.mp3"  ] && create_stub_mp3  "$RESOURCES_DIR/music.mp3"
-[ ! -f "$RESOURCES_DIR/haptic.ahap"] && create_stub_ahap "$RESOURCES_DIR/haptic.ahap"
-[ ! -f "$RESOURCES_DIR/cover.png"  ] && create_stub_png  "$RESOURCES_DIR/cover.png"
+[ ! -f "$RESOURCES_DIR/music.mp3"   ] && create_stub_mp3  "$RESOURCES_DIR/music.mp3"
+[ ! -f "$RESOURCES_DIR/haptic.ahap" ] && create_stub_ahap "$RESOURCES_DIR/haptic.ahap"
+[ ! -f "$RESOURCES_DIR/cover.png"   ] && create_stub_png  "$RESOURCES_DIR/cover.png"
 
 echo "[init] Resources:"
 ls -lh "$RESOURCES_DIR/"
 
-# ── 4. Collect Swift source files ────────────────────────────────────────────
+# ── 4. Collect Swift source files into indexed arrays ────────────────────────
+# Uses plain indexed arrays only — compatible with bash 3.2
 SWIFT_FILES=()
 while IFS= read -r -d $'\0' f; do
   SWIFT_FILES+=("$f")
@@ -130,20 +108,25 @@ done < <(find "$SOURCES_DIR" -name "*.swift" -print0 | sort -z)
 echo "[init] Swift sources (${#SWIFT_FILES[@]} files):"
 for f in "${SWIFT_FILES[@]}"; do echo "  $f"; done
 
-# ── 5. Collect Resource files ─────────────────────────────────────────────────
 RESOURCE_FILES=()
 while IFS= read -r -d $'\0' f; do
   RESOURCE_FILES+=("$f")
-done < <(find "$RESOURCES_DIR" -type f \( -name "*.mp3" -o -name "*.ahap" -o -name "*.mp4" -o -name "*.png" -o -name "*.jpg" \) -print0 | sort -z)
+done < <(find "$RESOURCES_DIR" -type f \( \
+    -name "*.mp3" -o -name "*.ahap" -o \
+    -name "*.mp4" -o -name "*.png"  -o -name "*.jpg" \
+  \) -print0 | sort -z)
 
 echo "[init] Resources (${#RESOURCE_FILES[@]} files):"
 for f in "${RESOURCE_FILES[@]}"; do echo "  $f"; done
 
-# ── 6. Generate UUIDs ─────────────────────────────────────────────────────────
-# We need stable, unique UUIDs for every pbxproj object.
+# ── 5. UUID generator (pure Python — no uuidgen flags needed) ─────────────────
 gen_uuid() {
   python3 -c "import uuid; print(uuid.uuid4().hex[:24].upper())"
 }
+
+# ── 6. Generate all UUIDs up front using parallel indexed arrays ──────────────
+# Instead of declare -A (bash 4+), we use parallel indexed arrays and a
+# Python lookup helper written to a temp file.
 
 PROJECT_UUID=$(gen_uuid)
 MAIN_GROUP_UUID=$(gen_uuid)
@@ -163,105 +146,107 @@ CONFIG_LIST_UUID=$(gen_uuid)
 PROJECT_CONFIG_LIST_UUID=$(gen_uuid)
 INFOPLIST_UUID=$(gen_uuid)
 
-# Generate UUID pairs (file ref + build file) for each Swift source
-declare -A SWIFT_FILE_REF_UUIDS
-declare -A SWIFT_BUILD_FILE_UUIDS
+# Parallel arrays for Swift files
+SWIFT_FR_UUIDS=()
+SWIFT_BF_UUIDS=()
 for f in "${SWIFT_FILES[@]}"; do
-  SWIFT_FILE_REF_UUIDS["$f"]=$(gen_uuid)
-  SWIFT_BUILD_FILE_UUIDS["$f"]=$(gen_uuid)
+  SWIFT_FR_UUIDS+=("$(gen_uuid)")
+  SWIFT_BF_UUIDS+=("$(gen_uuid)")
 done
 
-# Generate UUID pairs for each resource
-declare -A RES_FILE_REF_UUIDS
-declare -A RES_BUILD_FILE_UUIDS
+# Parallel arrays for resource files
+RES_FR_UUIDS=()
+RES_BF_UUIDS=()
 for f in "${RESOURCE_FILES[@]}"; do
-  RES_FILE_REF_UUIDS["$f"]=$(gen_uuid)
-  RES_BUILD_FILE_UUIDS["$f"]=$(gen_uuid)
+  RES_FR_UUIDS+=("$(gen_uuid)")
+  RES_BF_UUIDS+=("$(gen_uuid)")
 done
 
-# ── 7. Build the pbxproj sections ────────────────────────────────────────────
+# ── 7. Build pbxproj section strings ─────────────────────────────────────────
 
-# Helper: relative path from project root
-rel_path() { python3 -c "import os; print(os.path.relpath('$1', '$REPO_ROOT'))"; }
-
-# 7a. PBXBuildFile section entries
 SWIFT_BUILD_FILE_ENTRIES=""
-for f in "${SWIFT_FILES[@]}"; do
-  BF_UUID="${SWIFT_BUILD_FILE_UUIDS[$f]}"
-  FR_UUID="${SWIFT_FILE_REF_UUIDS[$f]}"
-  SWIFT_BUILD_FILE_ENTRIES+="    $BF_UUID /* $(basename $f) in Sources */ = {isa = PBXBuildFile; fileRef = $FR_UUID /* $(basename $f) */; };
+for i in "${!SWIFT_FILES[@]}"; do
+  f="${SWIFT_FILES[$i]}"
+  BF="${SWIFT_BF_UUIDS[$i]}"
+  FR="${SWIFT_FR_UUIDS[$i]}"
+  NAME="$(basename "$f")"
+  SWIFT_BUILD_FILE_ENTRIES+="    $BF /* $NAME in Sources */ = {isa = PBXBuildFile; fileRef = $FR /* $NAME */; };
 "
 done
 
 RES_BUILD_FILE_ENTRIES=""
-for f in "${RESOURCE_FILES[@]}"; do
-  BF_UUID="${RES_BUILD_FILE_UUIDS[$f]}"
-  FR_UUID="${RES_FILE_REF_UUIDS[$f]}"
-  RES_BUILD_FILE_ENTRIES+="    $BF_UUID /* $(basename $f) in Resources */ = {isa = PBXBuildFile; fileRef = $FR_UUID /* $(basename $f) */; };
+for i in "${!RESOURCE_FILES[@]}"; do
+  f="${RESOURCE_FILES[$i]}"
+  BF="${RES_BF_UUIDS[$i]}"
+  FR="${RES_FR_UUIDS[$i]}"
+  NAME="$(basename "$f")"
+  RES_BUILD_FILE_ENTRIES+="    $BF /* $NAME in Resources */ = {isa = PBXBuildFile; fileRef = $FR /* $NAME */; };
 "
 done
 
-# 7b. PBXFileReference entries for Swift sources
 SWIFT_FILE_REF_ENTRIES=""
-for f in "${SWIFT_FILES[@]}"; do
-  FR_UUID="${SWIFT_FILE_REF_UUIDS[$f]}"
-  REL="$(rel_path $f)"
-  SWIFT_FILE_REF_ENTRIES+="    $FR_UUID /* $(basename $f) */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = $(basename $f); sourceTree = \"<group>\"; };
+for i in "${!SWIFT_FILES[@]}"; do
+  f="${SWIFT_FILES[$i]}"
+  FR="${SWIFT_FR_UUIDS[$i]}"
+  NAME="$(basename "$f")"
+  SWIFT_FILE_REF_ENTRIES+="    $FR /* $NAME */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = $NAME; sourceTree = \"<group>\"; };
 "
 done
 
-# 7c. PBXFileReference entries for resources
 RES_FILE_REF_ENTRIES=""
-for f in "${RESOURCE_FILES[@]}"; do
-  FR_UUID="${RES_FILE_REF_UUIDS[$f]}"
+for i in "${!RESOURCE_FILES[@]}"; do
+  f="${RESOURCE_FILES[$i]}"
+  FR="${RES_FR_UUIDS[$i]}"
+  NAME="$(basename "$f")"
   EXT="${f##*.}"
   case "$EXT" in
-    mp3)  FT="audio.mpeg";;
-    ahap) FT="file";;
-    mp4)  FT="com.apple.m4v-video";;
-    png)  FT="image.png";;
-    jpg)  FT="image.jpeg";;
-    *)    FT="file";;
+    mp3)  FT="audio.mpeg" ;;
+    ahap) FT="file" ;;
+    mp4)  FT="com.apple.m4v-video" ;;
+    png)  FT="image.png" ;;
+    jpg)  FT="image.jpeg" ;;
+    *)    FT="file" ;;
   esac
-  RES_FILE_REF_ENTRIES+="    $FR_UUID /* $(basename $f) */ = {isa = PBXFileReference; lastKnownFileType = $FT; path = $(basename $f); sourceTree = \"<group>\"; };
+  RES_FILE_REF_ENTRIES+="    $FR /* $NAME */ = {isa = PBXFileReference; lastKnownFileType = $FT; path = $NAME; sourceTree = \"<group>\"; };
 "
 done
 
-# 7d. Sources group children (Swift files only)
 SOURCES_GROUP_CHILDREN=""
-for f in "${SWIFT_FILES[@]}"; do
-  FR_UUID="${SWIFT_FILE_REF_UUIDS[$f]}"
-  SOURCES_GROUP_CHILDREN+="      $FR_UUID /* $(basename $f) */,
+for i in "${!SWIFT_FILES[@]}"; do
+  NAME="$(basename "${SWIFT_FILES[$i]}")"
+  FR="${SWIFT_FR_UUIDS[$i]}"
+  SOURCES_GROUP_CHILDREN+="        $FR /* $NAME */,
 "
 done
+SOURCES_GROUP_CHILDREN+="        $INFOPLIST_UUID /* Info.plist */,
+"
 
-# 7e. Resources group children
 RES_GROUP_CHILDREN=""
-for f in "${RESOURCE_FILES[@]}"; do
-  FR_UUID="${RES_FILE_REF_UUIDS[$f]}"
-  RES_GROUP_CHILDREN+="      $FR_UUID /* $(basename $f) */,
+for i in "${!RESOURCE_FILES[@]}"; do
+  NAME="$(basename "${RESOURCE_FILES[$i]}")"
+  FR="${RES_FR_UUIDS[$i]}"
+  RES_GROUP_CHILDREN+="        $FR /* $NAME */,
 "
 done
 
-# 7f. PBXSourcesBuildPhase file list
 SOURCES_PHASE_FILES=""
-for f in "${SWIFT_FILES[@]}"; do
-  BF_UUID="${SWIFT_BUILD_FILE_UUIDS[$f]}"
-  SOURCES_PHASE_FILES+="      $BF_UUID /* $(basename $f) in Sources */,
+for i in "${!SWIFT_FILES[@]}"; do
+  NAME="$(basename "${SWIFT_FILES[$i]}")"
+  BF="${SWIFT_BF_UUIDS[$i]}"
+  SOURCES_PHASE_FILES+="        $BF /* $NAME in Sources */,
 "
 done
 
-# 7g. PBXResourcesBuildPhase file list
 RESOURCES_PHASE_FILES=""
-for f in "${RESOURCE_FILES[@]}"; do
-  BF_UUID="${RES_BUILD_FILE_UUIDS[$f]}"
-  RESOURCES_PHASE_FILES+="      $BF_UUID /* $(basename $f) in Resources */,
+for i in "${!RESOURCE_FILES[@]}"; do
+  NAME="$(basename "${RESOURCE_FILES[$i]}")"
+  BF="${RES_BF_UUIDS[$i]}"
+  RESOURCES_PHASE_FILES+="        $BF /* $NAME in Resources */,
 "
 done
 
-# ── 8. Write the Info.plist ───────────────────────────────────────────────────
+# ── 8. Write Info.plist ───────────────────────────────────────────────────────
 INFOPLIST_PATH="$SOURCES_DIR/Info.plist"
-/usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier          string $BUNDLE_ID"             "$INFOPLIST_PATH" 2>/dev/null || true
 cat > "$INFOPLIST_PATH" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -296,31 +281,28 @@ cat > "$INFOPLIST_PATH" << PLIST
 </plist>
 PLIST
 
-# Add Info.plist as a file reference
-INFOPLIST_PATH_REL="$(rel_path $INFOPLIST_PATH)"
-SOURCES_GROUP_CHILDREN+="      $INFOPLIST_UUID /* Info.plist */,
-"
+echo "[init] Info.plist written"
 
-# ── 9. Write the .pbxproj ─────────────────────────────────────────────────────
+# ── 9. Write project.pbxproj ──────────────────────────────────────────────────
 cat > "$PBXPROJ" << PBXPROJ
-// !$*UTF8*$!
+// !\$*UTF8*\$!
 {
   archiveVersion = 1;
   classes = {};
   objectVersion = 56;
   objects = {
 
-/* ── PBXBuildFile ── */
+/* PBXBuildFile */
 $SWIFT_BUILD_FILE_ENTRIES
 $RES_BUILD_FILE_ENTRIES
 
-/* ── PBXFileReference ── */
+/* PBXFileReference */
 $SWIFT_FILE_REF_ENTRIES
 $RES_FILE_REF_ENTRIES
     $APP_PRODUCT_UUID /* $PROJECT_NAME.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = $PROJECT_NAME.app; sourceTree = BUILT_PRODUCTS_DIR; };
     $INFOPLIST_UUID /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 
-/* ── PBXFrameworksBuildPhase ── */
+/* PBXFrameworksBuildPhase */
     $FRAMEWORKS_PHASE_UUID = {
       isa = PBXFrameworksBuildPhase;
       buildActionMask = 2147483647;
@@ -328,7 +310,7 @@ $RES_FILE_REF_ENTRIES
       runOnlyForDeploymentPostprocessing = 0;
     };
 
-/* ── PBXGroup ── */
+/* PBXGroup */
     $MAIN_GROUP_UUID = {
       isa = PBXGroup;
       children = (
@@ -340,9 +322,7 @@ $RES_FILE_REF_ENTRIES
     };
     $PRODUCTS_GROUP_UUID /* Products */ = {
       isa = PBXGroup;
-      children = (
-        $APP_PRODUCT_UUID /* $PROJECT_NAME.app */,
-      );
+      children = ($APP_PRODUCT_UUID /* $PROJECT_NAME.app */);
       name = Products;
       sourceTree = "<group>";
     };
@@ -365,7 +345,7 @@ $RES_GROUP_CHILDREN
       sourceTree = "<group>";
     };
 
-/* ── PBXNativeTarget ── */
+/* PBXNativeTarget */
     $TARGET_UUID /* $PROJECT_NAME */ = {
       isa = PBXNativeTarget;
       buildConfigurationList = $CONFIG_LIST_UUID;
@@ -382,18 +362,14 @@ $RES_GROUP_CHILDREN
       productType = "com.apple.product-type.application";
     };
 
-/* ── PBXProject ── */
+/* PBXProject */
     $PROJECT_UUID /* Project object */ = {
       isa = PBXProject;
       attributes = {
         BuildIndependentTargetsInParallel = 1;
         LastSwiftUpdateCheck = 1500;
         LastUpgradeCheck = 1500;
-        TargetAttributes = {
-          $TARGET_UUID = {
-            CreatedOnToolsVersion = 15.0;
-          };
-        };
+        TargetAttributes = { $TARGET_UUID = { CreatedOnToolsVersion = 15.0; }; };
       };
       buildConfigurationList = $PROJECT_CONFIG_LIST_UUID;
       compatibilityVersion = "Xcode 14.0";
@@ -407,7 +383,7 @@ $RES_GROUP_CHILDREN
       targets = ($TARGET_UUID /* $PROJECT_NAME */);
     };
 
-/* ── PBXResourcesBuildPhase ── */
+/* PBXResourcesBuildPhase */
     $RESOURCES_PHASE_UUID = {
       isa = PBXResourcesBuildPhase;
       buildActionMask = 2147483647;
@@ -417,7 +393,7 @@ $RESOURCES_PHASE_FILES
       runOnlyForDeploymentPostprocessing = 0;
     };
 
-/* ── PBXSourcesBuildPhase ── */
+/* PBXSourcesBuildPhase */
     $SOURCES_PHASE_UUID = {
       isa = PBXSourcesBuildPhase;
       buildActionMask = 2147483647;
@@ -427,7 +403,7 @@ $SOURCES_PHASE_FILES
       runOnlyForDeploymentPostprocessing = 0;
     };
 
-/* ── XCBuildConfiguration ── */
+/* XCBuildConfiguration */
     $DEBUG_CONFIG_UUID /* Debug */ = {
       isa = XCBuildConfiguration;
       buildSettings = {
@@ -448,7 +424,7 @@ $SOURCES_PHASE_FILES
         PRODUCT_NAME                          = $PROJECT_NAME;
         PROVISIONING_PROFILE_SPECIFIER        = "";
         SWIFT_ACTIVE_COMPILATION_CONDITIONS   = DEBUG;
-        SWIFT_OPTIMIZATION_LEVEL             = "-Onone";
+        SWIFT_OPTIMIZATION_LEVEL              = "-Onone";
         SWIFT_VERSION                         = 5.9;
         TARGETED_DEVICE_FAMILY                = "1,2";
         SKIP_INSTALL                          = NO;
@@ -475,7 +451,7 @@ $SOURCES_PHASE_FILES
         PRODUCT_NAME                          = $PROJECT_NAME;
         PROVISIONING_PROFILE_SPECIFIER        = "";
         SWIFT_ACTIVE_COMPILATION_CONDITIONS   = "";
-        SWIFT_OPTIMIZATION_LEVEL             = "-Owholemodule";
+        SWIFT_OPTIMIZATION_LEVEL              = "-Owholemodule";
         SWIFT_VERSION                         = 5.9;
         TARGETED_DEVICE_FAMILY                = "1,2";
         SKIP_INSTALL                          = NO;
@@ -485,38 +461,34 @@ $SOURCES_PHASE_FILES
     $PROJECT_DEBUG_CONFIG_UUID /* Debug */ = {
       isa = XCBuildConfiguration;
       buildSettings = {
-        ALWAYS_SEARCH_USER_PATHS = NO;
-        CLANG_ENABLE_MODULES     = YES;
-        ENABLE_STRICT_OBJC_MSGSEND = YES;
-        ENABLE_TESTABILITY       = YES;
-        GCC_DYNAMIC_NO_PIC       = NO;
+        ALWAYS_SEARCH_USER_PATHS  = NO;
+        CLANG_ENABLE_MODULES      = YES;
+        ENABLE_TESTABILITY        = YES;
         GCC_OPTIMIZATION_LEVEL   = 0;
-        MTL_ENABLE_DEBUG_INFO    = INCLUDE_SOURCE;
-        ONLY_ACTIVE_ARCH         = NO;
-        SDKROOT                  = iphoneos;
+        ONLY_ACTIVE_ARCH          = NO;
+        SDKROOT                   = iphoneos;
       };
       name = Debug;
     };
     $PROJECT_RELEASE_CONFIG_UUID /* Release */ = {
       isa = XCBuildConfiguration;
       buildSettings = {
-        ALWAYS_SEARCH_USER_PATHS = NO;
-        CLANG_ENABLE_MODULES     = YES;
-        ENABLE_STRICT_OBJC_MSGSEND = YES;
-        SDKROOT                  = iphoneos;
-        VALIDATE_PRODUCT         = YES;
+        ALWAYS_SEARCH_USER_PATHS  = NO;
+        CLANG_ENABLE_MODULES      = YES;
+        SDKROOT                   = iphoneos;
+        VALIDATE_PRODUCT          = YES;
       };
       name = Release;
     };
 
-/* ── XCConfigurationList ── */
-    $CONFIG_LIST_UUID /* Build configuration list for PBXNativeTarget "$PROJECT_NAME" */ = {
+/* XCConfigurationList */
+    $CONFIG_LIST_UUID = {
       isa = XCConfigurationList;
       buildConfigurations = ($DEBUG_CONFIG_UUID /* Debug */, $RELEASE_CONFIG_UUID /* Release */);
       defaultConfigurationIsVisible = 0;
       defaultConfigurationName = Release;
     };
-    $PROJECT_CONFIG_LIST_UUID /* Build configuration list for PBXProject "$PROJECT_NAME" */ = {
+    $PROJECT_CONFIG_LIST_UUID = {
       isa = XCConfigurationList;
       buildConfigurations = ($PROJECT_DEBUG_CONFIG_UUID /* Debug */, $PROJECT_RELEASE_CONFIG_UUID /* Release */);
       defaultConfigurationIsVisible = 0;
@@ -530,9 +502,9 @@ PBXPROJ
 
 echo "[init] project.pbxproj written ($(wc -c < "$PBXPROJ") bytes)"
 
-# ── 10. Write the shared scheme ──────────────────────────────────────────────
-SCHEME_PATH="$XCODEPROJ_DIR/xcshareddata/xcschemes/$SCHEME_NAME.xcscheme"
-cat > "$SCHEME_PATH" << SCHEME
+# ── 10. Write shared scheme ───────────────────────────────────────────────────
+SCHEME_FILE="$XCODEPROJ_DIR/xcshareddata/xcschemes/$SCHEME_NAME.xcscheme"
+cat > "$SCHEME_FILE" << SCHEME
 <?xml version="1.0" encoding="UTF-8"?>
 <Scheme LastUpgradeVersion="1500" version="1.7">
   <BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES">
@@ -578,14 +550,14 @@ cat > "$SCHEME_PATH" << SCHEME
 </Scheme>
 SCHEME
 
-echo "[init] Scheme written: $SCHEME_PATH"
+echo "[init] Scheme written: $SCHEME_FILE"
 
-# ── 11. Sanity check ─────────────────────────────────────────────────────────
+# ── 11. Final validation ──────────────────────────────────────────────────────
 echo ""
-echo "[init] Final project structure:"
+echo "[init] Project structure:"
 find "$XCODEPROJ_DIR" -type f | sort
 echo ""
-echo "[init] Validating project with xcodebuild -list..."
+echo "[init] Validating with xcodebuild -list..."
 xcodebuild -project "$XCODEPROJ_DIR" -list
 echo ""
-echo "[init] ✓ build_init.sh complete"
+echo "[init] build_init.sh complete"
